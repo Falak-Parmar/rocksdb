@@ -226,6 +226,20 @@ bool MemTable::ShouldFlushNow() {
 
   approximate_memory_usage_.StoreRelaxed(allocated_memory);
 
+  // Experiment 3: Adaptive Flush Trigger Policy (Early Flush)
+  if (write_buffer_size > 0) {
+    double occupancy = static_cast<double>(allocated_memory) / write_buffer_size;
+    if (occupancy >= 0.75) {
+      static std::atomic<uint64_t> early_flush_count{0};
+      uint64_t count =
+          early_flush_count.fetch_add(1, std::memory_order_relaxed) + 1;
+      fprintf(stderr,
+              "[AdaptiveFlush] Occupancy: %.2f%% | EarlyFlushCount: %llu\n",
+              occupancy * 100.0, (unsigned long long)count);
+      return true;
+    }
+  }
+
   // if we can still allocate one more block without exceeding the
   // over-allocation ratio, then we should not flush.
   if (allocated_memory + kArenaBlockSize <
