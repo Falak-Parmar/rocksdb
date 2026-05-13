@@ -4,6 +4,7 @@
 //  (found in the LICENSE.Apache file in the root directory).
 //
 #include <random>
+#include <mutex>
 
 #include "db/memtable.h"
 #include "memory/arena.h"
@@ -19,6 +20,8 @@ class SkipListRep : public MemTableRep {
   const MemTableRep::KeyComparator& cmp_;
   const SliceTransform* transform_;
   const size_t lookahead_;
+
+  mutable std::mutex mu_;
 
   friend class LookaheadIterator;
 
@@ -40,35 +43,43 @@ class SkipListRep : public MemTableRep {
   // Insert key into the list.
   // REQUIRES: nothing that compares equal to key is currently in the list.
   void Insert(KeyHandle handle) override {
+    std::lock_guard<std::mutex> lock(mu_);
     skip_list_.Insert(static_cast<char*>(handle));
   }
 
   bool InsertKey(KeyHandle handle) override {
+    std::lock_guard<std::mutex> lock(mu_);
     return skip_list_.Insert(static_cast<char*>(handle));
   }
 
   void InsertWithHint(KeyHandle handle, void** hint) override {
+    std::lock_guard<std::mutex> lock(mu_);
     skip_list_.InsertWithHint(static_cast<char*>(handle), hint);
   }
 
   bool InsertKeyWithHint(KeyHandle handle, void** hint) override {
+    std::lock_guard<std::mutex> lock(mu_);
     return skip_list_.InsertWithHint(static_cast<char*>(handle), hint);
   }
 
   void InsertWithHintConcurrently(KeyHandle handle, void** hint) override {
+    std::lock_guard<std::mutex> lock(mu_);
     skip_list_.InsertWithHintConcurrently(static_cast<char*>(handle), hint);
   }
 
   bool InsertKeyWithHintConcurrently(KeyHandle handle, void** hint) override {
+    std::lock_guard<std::mutex> lock(mu_);
     return skip_list_.InsertWithHintConcurrently(static_cast<char*>(handle),
                                                  hint);
   }
 
   void InsertConcurrently(KeyHandle handle) override {
+    std::lock_guard<std::mutex> lock(mu_);
     skip_list_.InsertConcurrently(static_cast<char*>(handle));
   }
 
   bool InsertKeyConcurrently(KeyHandle handle) override {
+    std::lock_guard<std::mutex> lock(mu_);
     return skip_list_.InsertConcurrently(static_cast<char*>(handle));
   }
 

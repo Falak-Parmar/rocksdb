@@ -54,6 +54,7 @@
 #include "test_util/sync_point.h"
 #include "util/atomic.h"
 #include "util/random.h"
+#include <mutex>
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -245,6 +246,8 @@ class InlineSkipList {
   // case.  It caches the prev and next found during the most recent
   // non-concurrent insertion.
   Splice* seq_splice_;
+
+  mutable std::mutex mu_;
 
   inline int GetMaxHeight() const { return max_height_.LoadRelaxed(); }
 
@@ -1027,20 +1030,16 @@ template <class Comparator>
 template <bool UseCAS>
 bool InlineSkipList<Comparator>::Insert(const char* key, Splice* splice,
                                         bool allow_partial_splice_fix) {
+  std::lock_guard<std::mutex> lock(mu_);
   Node* x = reinterpret_cast<Node*>(const_cast<char*>(key)) - 1;
   const DecodedKey key_decoded = compare_.decode_key(key);
   int height = x->UnstashHeight();
   assert(height >= 1 && height <= kMaxHeight_);
 
   int max_height = max_height_.LoadRelaxed();
-  while (height > max_height) {
-    if (max_height_.CasWeakRelaxed(max_height, height)) {
-      // successfully updated it
-      max_height = height;
-      break;
-    }
-    // else retry, possibly exiting the loop because somebody else
-    // increased it
+  if (height > max_height) {
+    max_height_.StoreRelaxed(height);
+    max_height = height;
   }
   assert(max_height <= kMaxPossibleHeight);
 
@@ -1131,71 +1130,30 @@ bool InlineSkipList<Comparator>::Insert(const char* key, Splice* splice,
   }
 
   bool splice_is_valid = true;
-  if (UseCAS) {
-    for (int i = 0; i < height; ++i) {
-      while (true) {
-        // Checking for duplicate keys on the level 0 is sufficient
-        if (UNLIKELY(i == 0 && splice->next_[i] != nullptr &&
-                     compare_(splice->next_[i]->Key(), key_decoded) <= 0)) {
-          // duplicate key
-          return false;
-        }
-        if (UNLIKELY(i == 0 && splice->prev_[i] != head_ &&
-                     compare_(splice->prev_[i]->Key(), key_decoded) >= 0)) {
-          // duplicate key
-          return false;
-        }
-        assert(splice->next_[i] == nullptr ||
-               compare_(x->Key(), splice->next_[i]->Key()) < 0);
-        assert(splice->prev_[i] == head_ ||
-               compare_(splice->prev_[i]->Key(), x->Key()) < 0);
-        x->NoBarrier_SetNext(i, splice->next_[i]);
-        if (splice->prev_[i]->CASNext(i, splice->next_[i], x)) {
-          // success
-          break;
-        }
-        // CAS failed, we need to recompute prev and next. It is unlikely
-        // to be helpful to try to use a different level as we redo the
-        // search, because it should be unlikely that lots of nodes have
-        // been inserted between prev[i] and next[i]. No point in using
-        // next[i] as the after hint, because we know it is stale.
-        FindSpliceForLevel<false>(key_decoded, splice->prev_[i], nullptr, i,
-                                  &splice->prev_[i], &splice->next_[i]);
-
-        // Since we've narrowed the bracket for level i, we might have
-        // violated the Splice constraint between i and i-1.  Make sure
-        // we recompute the whole thing next time.
-        if (i > 0) {
-          splice_is_valid = false;
-        }
-      }
+  for (int i = 0; i < height; ++i) {
+    if (i >= recompute_height &&
+        splice->prev_[i]->Next(i) != splice->next_[i]) {
+      FindSpliceForLevel<false>(key_decoded, splice->prev_[i], nullptr, i,
+                                &splice->prev_[i], &splice->next_[i]);
     }
-  } else {
-    for (int i = 0; i < height; ++i) {
-      if (i >= recompute_height &&
-          splice->prev_[i]->Next(i) != splice->next_[i]) {
-        FindSpliceForLevel<false>(key_decoded, splice->prev_[i], nullptr, i,
-                                  &splice->prev_[i], &splice->next_[i]);
-      }
-      // Checking for duplicate keys on the level 0 is sufficient
-      if (UNLIKELY(i == 0 && splice->next_[i] != nullptr &&
-                   compare_(splice->next_[i]->Key(), key_decoded) <= 0)) {
-        // duplicate key
-        return false;
-      }
-      if (UNLIKELY(i == 0 && splice->prev_[i] != head_ &&
-                   compare_(splice->prev_[i]->Key(), key_decoded) >= 0)) {
-        // duplicate key
-        return false;
-      }
-      assert(splice->next_[i] == nullptr ||
-             compare_(x->Key(), splice->next_[i]->Key()) < 0);
-      assert(splice->prev_[i] == head_ ||
-             compare_(splice->prev_[i]->Key(), x->Key()) < 0);
-      assert(splice->prev_[i]->Next(i) == splice->next_[i]);
-      x->NoBarrier_SetNext(i, splice->next_[i]);
-      splice->prev_[i]->SetNext(i, x);
+    // Checking for duplicate keys on the level 0 is sufficient
+    if (UNLIKELY(i == 0 && splice->next_[i] != nullptr &&
+                 compare_(splice->next_[i]->Key(), key_decoded) <= 0)) {
+      // duplicate key
+      return false;
     }
+    if (UNLIKELY(i == 0 && splice->prev_[i] != head_ &&
+                 compare_(splice->prev_[i]->Key(), key_decoded) >= 0)) {
+      // duplicate key
+      return false;
+    }
+    assert(splice->next_[i] == nullptr ||
+           compare_(x->Key(), splice->next_[i]->Key()) < 0);
+    assert(splice->prev_[i] == head_ ||
+           compare_(splice->prev_[i]->Key(), x->Key()) < 0);
+    assert(splice->prev_[i]->Next(i) == splice->next_[i]);
+    x->NoBarrier_SetNext(i, splice->next_[i]);
+    splice->prev_[i]->SetNext(i, x);
   }
   if (splice_is_valid) {
     for (int i = 0; i < height; ++i) {
