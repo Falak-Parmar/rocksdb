@@ -2235,6 +2235,10 @@ class DBImpl : public DB {
   // threshold.
   void WriteBufferManagerStallWrites();
 
+  std::atomic<uint64_t> last_stats_dump_time_{0};
+  std::atomic<uint64_t> last_stats_keys_{0};
+  std::atomic<uint64_t> last_stats_bytes_{0};
+
   Status ThrottleLowPriWritesIfNeeded(const WriteOptions& write_options,
                                       WriteBatch* my_batch);
 

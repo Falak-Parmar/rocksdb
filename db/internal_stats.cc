@@ -84,6 +84,7 @@ const std::map<InternalStats::InternalDBStatsType, DBStatInfo>
          DBStatInfo{WriteStallStatsMapKeys::CauseConditionCount(
              WriteStallCause::kWriteBufferManagerLimit,
              WriteStallCondition::kStopped)}},
+        {InternalStats::kIntStatsNumFlushes, DBStatInfo{"db.num_memtable_flushes"}},
 };
 
 namespace {

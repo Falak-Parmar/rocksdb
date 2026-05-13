@@ -7,6 +7,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 #include <cinttypes>
+#include <thread>
+#include <chrono>
 
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
@@ -1045,6 +1047,36 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
     RecordTick(stats_, NUMBER_KEYS_WRITTEN, total_count);
     stats->AddDBStats(InternalStats::kIntStatsBytesWritten, total_byte_size);
     RecordTick(stats_, BYTES_WRITTEN, total_byte_size);
+
+    // Experiment 1: MemTable Insert Statistics Reporting
+    uint64_t now = immutable_db_options_.clock->NowMicros();
+    uint64_t last = last_stats_dump_time_.load(std::memory_order_relaxed);
+    if (now - last >= 1000000) { // Every 1 second
+      if (last_stats_dump_time_.compare_exchange_strong(last, now)) {
+        uint64_t keys_now = stats->GetDBStats(InternalStats::kIntStatsNumKeysWritten);
+        uint64_t bytes_now = stats->GetDBStats(InternalStats::kIntStatsBytesWritten);
+        
+        uint64_t keys_delta = keys_now - last_stats_keys_.load(std::memory_order_relaxed);
+        uint64_t bytes_delta = bytes_now - last_stats_bytes_.load(std::memory_order_relaxed);
+        
+        last_stats_keys_.store(keys_now, std::memory_order_relaxed);
+        last_stats_bytes_.store(bytes_now, std::memory_order_relaxed);
+
+        uint64_t flushes = stats->GetDBStats(InternalStats::kIntStatsNumFlushes);
+        double avg_size = keys_delta > 0 ? static_cast<double>(bytes_delta) / keys_delta : 0;
+        double inserts_per_sec = keys_delta / ((now - last) / 1000000.0);
+        
+        // Occupancy from default CF
+        ColumnFamilyData* default_cfd = default_cf_handle_->cfd();
+        size_t mem_usage = default_cfd->mem()->ApproximateMemoryUsage();
+        size_t write_buffer_size = default_cfd->GetLatestMutableCFOptions().write_buffer_size;
+        double occupancy = (write_buffer_size > 0) ? (100.0 * mem_usage / write_buffer_size) : 0;
+
+        fprintf(stderr, "\n[EXP1] Inserts/sec: %.0f | AvgSize: %.2f | Flushes: %llu | Occupancy: %.2f%%\n",
+                inserts_per_sec, avg_size, (unsigned long long)flushes, occupancy);
+      }
+    }
+
     RecordInHistogram(stats_, BYTES_PER_WRITE, total_byte_size);
 
     PERF_TIMER_STOP(write_pre_and_post_process_time);
@@ -2725,6 +2757,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
   cfd->mem()->SetNextLogNumber(cur_wal_number_);
   assert(new_mem != nullptr);
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
+  cfd->internal_stats()->AddDBStats(InternalStats::kIntStatsNumFlushes, 1);
   if (new_imm) {
     // Need to assign memtable id here before SetMemtable() below assigns id to
     // the new live memtable
